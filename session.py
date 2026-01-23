@@ -72,7 +72,7 @@ class Session:
         # Callback for channel mode responses
         self._response_callback: Optional[Callable[[str], None]] = None
         # Track query count when compact_boundary received (inject when that query ends)
-        self._compact_query_count: int = -1
+        self._compact_pending: bool = False  # True when compact_boundary received, waiting for query end
         # Queue of prompts to send after current query completes
         self._queued_prompts: List[str] = []
 
@@ -707,9 +707,10 @@ class Session:
             return
 
         # 5. Process deferred actions (retain injection, queued prompts)
-        if self._compact_query_count == self.query_count:
-            self._compact_query_count = -1
-            print(f"[Claude] _on_done: query #{self.query_count} had compact_boundary, injecting retain")
+        print(f"[Claude] _on_done: query #{self.query_count}, _compact_pending={self._compact_pending}")
+        if self._compact_pending:
+            self._compact_pending = False
+            print(f"[Claude] _on_done: compact_boundary was received, injecting retain")
             self._inject_retain_after_compact()
             return
 
@@ -725,7 +726,7 @@ class Session:
 
     def _clear_deferred_state(self) -> None:
         """Clear all deferred action state. Called on error/interrupt."""
-        self._compact_query_count = -1
+        self._compact_pending = False
         self._queued_prompts.clear()
         self._input_mode_entered = False  # Allow re-entry to input mode
 
@@ -794,7 +795,7 @@ class Session:
             self._status("interrupting...")
             self.working = False
             # Clear pending state but don't touch _input_mode_entered yet
-            self._compact_query_count = -1
+            self._compact_pending = False
             self._queued_prompts.clear()
 
         # Break any active channel connection (only for user-initiated interrupts)
@@ -954,9 +955,9 @@ class Session:
             data = params.get("data", {})
             print(f"[Claude] system subtype={subtype}")
             if subtype == "compact_boundary":
-                # Track which query had compact - only inject when THAT query ends
-                self._compact_query_count = self.query_count
-                print(f"[Claude] compact_boundary received in query #{self.query_count}, will inject retain when it completes")
+                # Mark that compaction happened - inject retain when query ends
+                self._compact_pending = True
+                print(f"[Claude] compact_boundary received, will inject retain when query completes")
 
     def _set_name(self, name: str) -> None:
         """Set session name and update UI."""

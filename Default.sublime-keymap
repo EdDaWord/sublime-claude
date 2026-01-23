@@ -201,6 +201,14 @@
         ]
     },
     {
+        "keys": ["ctrl+shift+c"],
+        "command": "claude_clear_edits",
+        "args": { "all_edits": true },
+        "context": [
+            { "key": "setting.order_table_view", "operator": "equal", "operand": true }
+        ]
+    },
+    {
         "keys": ["t"],
         "command": "claude_toggle_edits_grouped",
         "context": [

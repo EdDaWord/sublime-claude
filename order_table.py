@@ -579,10 +579,19 @@ class OrderTableView:
                         ctx = e.get("context", "")[:45]
                         lines.append(f"    {rel_path}:{e['line_num']:<5} {delta:<8} {ago:<10} {ctx}")
             else:
-                # Flat list sorted by time (newest first)
-                sorted_edits = sorted(edits, key=lambda x: x["timestamp"], reverse=True)[:15]
+                # Flat list sorted by time (newest first), merge same file:line
+                sorted_edits = sorted(edits, key=lambda x: x["timestamp"], reverse=True)
 
+                # Merge edits at same location (keep newest)
+                seen = set()
+                merged_edits = []
                 for e in sorted_edits:
+                    key = (e["file_path"], e["line_num"])
+                    if key not in seen:
+                        seen.add(key)
+                        merged_edits.append(e)
+
+                for e in merged_edits[:15]:
                     rel_path = _relative_path(e["file_path"], folders)
                     if len(rel_path) > 40:
                         rel_path = "..." + rel_path[-37:]
@@ -596,7 +605,7 @@ class OrderTableView:
                     lines.append(f"  {file_loc:<45} {delta:<8} {ago:<10} {ctx:<40} [{agent_id}]")
 
         lines.append("─" * 120)
-        lines.append("a add | Enter/g goto | o focus | q msg | c/C clear | x clear done | t toggle group")
+        lines.append("a add | Enter/g goto | o focus | q msg | c clear | C/Ctrl+C clear all | x clear done | t group")
 
         content = "\n".join(lines)
 
