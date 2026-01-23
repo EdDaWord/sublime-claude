@@ -83,6 +83,21 @@ class Order:
         return time.time() - self.claimed_at > CLAIM_TIMEOUT_SECS
 
 
+@dataclass
+class EditEntry:
+    """Record of an Edit/Write operation by an agent."""
+    id: str
+    agent_name: str
+    agent_view_id: int  # For messaging the agent
+    file_path: str
+    line_num: int
+    lines_added: int
+    lines_removed: int
+    timestamp: float
+    tool: str  # "Edit" or "Write"
+    context: str = ""  # First line or function name hint
+
+
 class OrderTable:
     """Persistent order list for agent assignments."""
 
@@ -91,6 +106,8 @@ class OrderTable:
         self.orders_file = os.path.join(project_root, ".claude", "orders.json")
         self._counter = 0
         self._orders: Dict[str, Order] = {}
+        self._edits: List[EditEntry] = []
+        self._edit_counter = 0
         self._load()
 
     def _load(self):
@@ -102,6 +119,13 @@ class OrderTable:
                 for order_data in data.get("orders", []):
                     order = Order.from_dict(order_data)
                     self._orders[order.id] = order
+                # Load edits with backwards compatibility
+                self._edit_counter = data.get("edit_counter", 0)
+                for e in data.get("edits", []):
+                    # Add defaults for new fields if missing
+                    e.setdefault("agent_view_id", 0)
+                    e.setdefault("context", "")
+                    self._edits.append(EditEntry(**e))
             except Exception as e:
                 print(f"[OrderTable] Load failed: {e}")
 
@@ -109,7 +133,9 @@ class OrderTable:
         os.makedirs(os.path.dirname(self.orders_file), exist_ok=True)
         data = {
             "counter": self._counter,
-            "orders": [o.to_dict() for o in self._orders.values()]
+            "orders": [o.to_dict() for o in self._orders.values()],
+            "edit_counter": self._edit_counter,
+            "edits": [asdict(e) for e in self._edits]
         }
         try:
             with open(self.orders_file, "w") as f:
@@ -196,6 +222,50 @@ class OrderTable:
             orders = [o for o in orders if o.state == state]
         orders = sorted(orders, key=lambda o: o.created_at)
         return [o.to_dict() for o in orders]
+
+    # --- Edit tracking ---
+
+    def add_edit(self, agent_name: str, agent_view_id: int, file_path: str, line_num: int,
+                 lines_added: int, lines_removed: int, tool: str, context: str = "") -> str:
+        """Record an edit event."""
+        self._edit_counter += 1
+        edit = EditEntry(
+            id=f"edit_{self._edit_counter}",
+            agent_name=agent_name,
+            agent_view_id=agent_view_id,
+            file_path=file_path,
+            line_num=line_num,
+            lines_added=lines_added,
+            lines_removed=lines_removed,
+            timestamp=time.time(),
+            tool=tool,
+            context=context
+        )
+        self._edits.append(edit)
+        # Keep only last 50 edits
+        if len(self._edits) > 50:
+            self._edits = self._edits[-50:]
+        self._save()
+        return edit.id
+
+    def clear_edits(self, file_path: str = None, edit_id: str = None):
+        """Clear edit history.
+
+        Args:
+            file_path: If provided, only clear edits for this file
+            edit_id: If provided, only clear this specific edit
+        """
+        if edit_id:
+            self._edits = [e for e in self._edits if e.id != edit_id]
+        elif file_path:
+            self._edits = [e for e in self._edits if e.file_path != file_path]
+        else:
+            self._edits = []
+        self._save()
+
+    def list_edits(self) -> List[dict]:
+        """List recent edits."""
+        return [asdict(e) for e in self._edits]
 
     def _auto_release_claims(self):
         """Release claims that are expired or from gone agents."""
@@ -310,6 +380,19 @@ class OrderTable:
         return len(done_ids)
 
 
+def _relative_time(timestamp: float) -> str:
+    """Get human-readable relative time."""
+    diff = time.time() - timestamp
+    if diff < 60:
+        return "just now"
+    elif diff < 3600:
+        return f"{int(diff/60)}m ago"
+    elif diff < 86400:
+        return f"{int(diff/3600)}h ago"
+    else:
+        return f"{int(diff/86400)}d ago"
+
+
 def _relative_path(file_path: str, folders: List[str]) -> str:
     """Get path relative to nearest project folder ancestor."""
     for folder in folders:
@@ -391,9 +474,19 @@ class OrderTableView:
             self.view.settings().set("line_numbers", False)
             self.view.settings().set("margin", 10)
             self.view.settings().set("font_size", 11)
+            self.view.settings().set("edits_grouped", False)  # Toggle for grouped view
             self.view.assign_syntax("Packages/ClaudeCode/OrderTable.sublime-syntax")
 
         self.refresh()
+
+    def toggle_edits_grouped(self):
+        """Toggle between flat and grouped-by-file edit display."""
+        if not self.view:
+            return
+        current = self.view.settings().get("edits_grouped", False)
+        self.view.settings().set("edits_grouped", not current)
+        self.refresh()
+        return not current
 
     def refresh(self):
         if not self.view or not self.view.is_valid():
@@ -447,8 +540,63 @@ class OrderTableView:
             if len(done) > 5:
                 lines.append(f"#   ... and {len(done)-5} more")
 
-        lines.append("─" * 50)
-        lines.append("a add | Enter goto | Cmd+Del | u undo | x clear done")
+        # Edits section
+        edits = self.table.list_edits()
+        grouped = self.view.settings().get("edits_grouped", False)
+        if edits:
+            lines.append("")
+            mode_indicator = "[grouped]" if grouped else "[by time]"
+            lines.append(f"📝 RECENT EDITS ({len(edits)}) {mode_indicator}")
+            lines.append("─" * 120)
+
+            if grouped:
+                # Group by file
+                from collections import defaultdict
+                by_file = defaultdict(list)
+                for e in edits:
+                    by_file[e["file_path"]].append(e)
+
+                # Sort files by most recent edit
+                sorted_files = sorted(by_file.items(),
+                                     key=lambda x: max(e["timestamp"] for e in x[1]),
+                                     reverse=True)
+
+                for file_path, file_edits in sorted_files[:8]:  # Top 8 files
+                    rel_path = _relative_path(file_path, folders)
+                    if len(rel_path) > 70:
+                        rel_path = "..." + rel_path[-67:]
+                    agent_ids = set(e["agent_view_id"] for e in file_edits)
+                    agent_str = ",".join(str(a) for a in agent_ids)
+
+                    lines.append(f"  {rel_path} [{agent_str}]")
+
+                    # Show edits sorted by time (newest first)
+                    for e in sorted(file_edits, key=lambda x: x["timestamp"], reverse=True)[:4]:
+                        delta = f"+{e['lines_added']}" if e['lines_added'] else ""
+                        if e['lines_removed']:
+                            delta += f"/-{e['lines_removed']}"
+                        ago = _relative_time(e["timestamp"])
+                        ctx = e.get("context", "")[:45]
+                        lines.append(f"    {rel_path}:{e['line_num']:<5} {delta:<8} {ago:<10} {ctx}")
+            else:
+                # Flat list sorted by time (newest first)
+                sorted_edits = sorted(edits, key=lambda x: x["timestamp"], reverse=True)[:15]
+
+                for e in sorted_edits:
+                    rel_path = _relative_path(e["file_path"], folders)
+                    if len(rel_path) > 40:
+                        rel_path = "..." + rel_path[-37:]
+                    ago = _relative_time(e["timestamp"])
+                    delta = f"+{e['lines_added']}" if e['lines_added'] else ""
+                    if e['lines_removed']:
+                        delta += f"/-{e['lines_removed']}"
+                    ctx = e.get("context", "")[:40]
+                    agent_id = e.get("agent_view_id", 0)
+                    file_loc = f"{rel_path}:{e['line_num']}"
+                    lines.append(f"  {file_loc:<45} {delta:<8} {ago:<10} {ctx:<40} [{agent_id}]")
+
+        lines.append("─" * 120)
+        lines.append("a add | Enter/g goto | o focus | q msg | c/C clear | x clear done | t toggle group")
 
         content = "\n".join(lines)
 

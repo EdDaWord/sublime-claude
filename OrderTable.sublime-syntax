@@ -52,3 +52,41 @@ contexts:
     - match: '^\s{4}(.+)$'
       captures:
         1: string.quoted.order-table
+
+    # Edit entries header
+    - match: '^📝 RECENT EDITS.*(\[grouped\]|\[by time\])'
+      captures:
+        1: keyword.control.order-table
+      scope: entity.name.section.order-table
+
+    # Grouped view: file header line (no line number)
+    - match: '^\s{2}(\S[^:\[]+)\s+\[([^\]]+)\]\s*$'
+      captures:
+        1: entity.name.filename.order-table
+        2: variable.parameter.order-table
+
+    # Edit entry line (both grouped indent and flat): file:line  delta  ago  context  [agent]?
+    - match: '^\s+(.+?):(\d+)\s+'
+      captures:
+        1: string.unquoted.order-table
+        2: constant.numeric.line.order-table
+      push: edit_entry_rest
+
+  edit_entry_rest:
+    # Delta (+N/-M)
+    - match: '(\+\d+)(/\-\d+)?'
+      captures:
+        1: markup.inserted.order-table
+        2: markup.deleted.order-table
+    # Time ago
+    - match: '\b(\d+[mhd]\s+ago|just\s+now)\b'
+      scope: comment.line.order-table
+    # Agent ID at end (flat view only)
+    - match: '\[(\d+)\]'
+      captures:
+        1: variable.parameter.order-table
+    # Context words
+    - match: '\S+'
+      scope: keyword.other.order-table
+    - match: '$'
+      pop: true

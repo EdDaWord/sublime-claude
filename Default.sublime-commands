@@ -124,6 +124,10 @@
         "command": "claude_show_order_table"
     },
     {
+        "caption": "Claude: Clear Edits for Current File",
+        "command": "claude_clear_file_edits"
+    },
+    {
         "caption": "Claude: View Retain Content",
         "command": "claude_retain",
         "args": {"action": "view"}

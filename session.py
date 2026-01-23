@@ -373,6 +373,78 @@ class Session:
         else:
             print("[Claude] No retain content to inject after compact")
 
+    def _record_edit(self, tool_name: str):
+        """Record an Edit/Write operation to the order table's edit log."""
+        from .order_table import get_table, refresh_order_table
+
+        # Get tool input from current conversation
+        if not self.output.current:
+            return
+        tools = self.output.current.tools
+        if not tools:
+            return
+
+        # Find the most recent tool of this type that's still pending
+        tool_input = None
+        for tool in reversed(tools):
+            if tool.name == tool_name and tool.status == "pending":
+                tool_input = tool.tool_input
+                break
+        if not tool_input:
+            return
+
+        file_path = tool_input.get("file_path") or tool_input.get("notebook_path")
+        if not file_path:
+            return
+
+        # Calculate line number, diff stats, and context
+        if tool_name == "Edit":
+            old = tool_input.get("old_string", "")
+            new = tool_input.get("new_string", "")
+            line_num = self._find_edit_line(file_path, new or old)
+            lines_added = len(new.splitlines()) if new else 0
+            lines_removed = len(old.splitlines()) if old else 0
+            context = self._extract_edit_context(new)
+        else:  # Write
+            content = tool_input.get("content", "")
+            line_num = 1
+            lines_added = len(content.splitlines())
+            lines_removed = 0
+            context = os.path.basename(file_path)
+
+        table = get_table(self.window)
+        if table:
+            agent_name = self.name or f"view_{self.output.view.id()}" if self.output.view else "unknown"
+            view_id = self.output.view.id() if self.output.view else 0
+            table.add_edit(agent_name, view_id, file_path, line_num or 1,
+                          lines_added, lines_removed, tool_name, context)
+            refresh_order_table(self.window)
+
+    def _extract_edit_context(self, text: str) -> str:
+        """Extract first meaningful line as context."""
+        if not text:
+            return ""
+        for line in text.split('\n'):
+            line = line.strip()
+            if line and not line.startswith('#') and not line.startswith('//'):
+                # Truncate and clean
+                return line[:50].strip()
+        return ""
+
+    def _find_edit_line(self, file_path: str, search: str) -> int:
+        """Find line number where content occurs in file."""
+        if not search or not os.path.exists(file_path):
+            return None
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+            pos = content.find(search)
+            if pos >= 0:
+                return content[:pos].count('\n') + 1
+        except Exception:
+            pass
+        return None
+
     def _build_profile_docs_list(self) -> None:
         """Build list of available docs from profile preload_docs patterns (no reading yet)."""
         if not self.profile or not self.profile.get("preload_docs"):
@@ -853,7 +925,13 @@ class Session:
             # Convert content to string if it's a list
             if isinstance(content, list):
                 content = "\n".join(str(c) for c in content)
-            if params.get("is_error"):
+            is_error = params.get("is_error")
+
+            # Track Edit/Write for edit log
+            if self.current_tool in ("Edit", "Write") and not is_error:
+                self._record_edit(self.current_tool)
+
+            if is_error:
                 self.output.tool_error(self.current_tool, content)
             else:
                 self.output.tool_done(self.current_tool, content)

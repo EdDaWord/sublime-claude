@@ -1791,7 +1791,8 @@ class MCPSocketServer:
             if not order_id:
                 return "error: Missing order_id"
             ok, msg = table.complete(order_id, agent_id)
-            sublime.set_timeout(lambda: refresh_order_table(window), 100)
+            if ok:
+                sublime.set_timeout(lambda: refresh_order_table(window), 100)
             return f"✓ {order_id} done" if ok else f"error: {msg}"
 
         elif action == "subscribe":
@@ -1811,6 +1812,8 @@ class MCPSocketServer:
             if not agent_id:
                 return "error: No agent context"
             ok, msg = table.claim(order_id, agent_id)
+            if ok:
+                sublime.set_timeout(lambda: refresh_order_table(window), 100)
             return f"✓ Claimed {order_id}" if ok else f"error: {msg}"
 
         elif action == "release":
@@ -1818,6 +1821,8 @@ class MCPSocketServer:
             if not order_id:
                 return "error: Missing order_id"
             ok, msg = table.release(order_id, agent_id)
+            if ok:
+                sublime.set_timeout(lambda: refresh_order_table(window), 100)
             return f"✓ Released {order_id}" if ok else f"error: {msg}"
 
         else:

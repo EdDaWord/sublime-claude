@@ -172,6 +172,42 @@
         ]
     },
     {
+        "keys": ["q"],
+        "command": "claude_edit_message",
+        "context": [
+            { "key": "setting.order_table_view", "operator": "equal", "operand": true }
+        ]
+    },
+    {
+        "keys": ["o"],
+        "command": "claude_focus_agent",
+        "context": [
+            { "key": "setting.order_table_view", "operator": "equal", "operand": true }
+        ]
+    },
+    {
+        "keys": ["c"],
+        "command": "claude_clear_edits",
+        "context": [
+            { "key": "setting.order_table_view", "operator": "equal", "operand": true }
+        ]
+    },
+    {
+        "keys": ["shift+c"],
+        "command": "claude_clear_edits",
+        "args": { "all_edits": true },
+        "context": [
+            { "key": "setting.order_table_view", "operator": "equal", "operand": true }
+        ]
+    },
+    {
+        "keys": ["t"],
+        "command": "claude_toggle_edits_grouped",
+        "context": [
+            { "key": "setting.order_table_view", "operator": "equal", "operand": true }
+        ]
+    },
+    {
         "keys": ["super+shift+v"],
         "command": "claude_paste_image",
         "context": [

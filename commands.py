@@ -1566,7 +1566,7 @@ class ClaudeShowOrderTableCommand(sublime_plugin.WindowCommand):
 
 
 class ClaudeOrderGotoCommand(sublime_plugin.TextCommand):
-    """Jump to the order location under cursor."""
+    """Jump to the order or edit location under cursor."""
 
     def run(self, edit):
         import re
@@ -1581,6 +1581,17 @@ class ClaudeOrderGotoCommand(sublime_plugin.TextCommand):
             return
         line_region = self.view.line(sel[0])
         line = self.view.substr(line_region)
+
+        # Check if it's an edit entry: file:line ... (not an order line)
+        edit_match = re.match(r'\s+(.+?):(\d+)\s+', line)
+        if edit_match and '[order_' not in line:
+            rel_path = edit_match.group(1).strip()
+            line_num = int(edit_match.group(2))
+            # Find full path from edits
+            file_path = self._find_edit_file(rel_path, line_num)
+            if file_path:
+                self._open_in_main_group(file_path, line_num, 1)
+            return
 
         # Extract order_id from line like "  [order_1] @ file.py:10"
         match = re.search(r'\[(order_\d+)\]', line)
@@ -1598,14 +1609,51 @@ class ClaudeOrderGotoCommand(sublime_plugin.TextCommand):
                 file_path = o["file_path"]
                 row = o.get("row", 0)
                 col = o.get("col", 0)
-                # Open file and goto position
-                self.view.window().open_file(
-                    f"{file_path}:{row+1}:{col+1}",
-                    sublime.ENCODED_POSITION
-                )
+                self._open_in_main_group(file_path, row + 1, col + 1)
                 return
 
         sublime.status_message("Order has no location")
+
+    def _open_in_main_group(self, file_path: str, row: int, col: int):
+        """Open file in main editing group, not the order table's group."""
+        window = self.view.window()
+        if not window:
+            return
+
+        # Get order table's group
+        order_group, _ = window.get_view_index(self.view)
+
+        # Find a different group (prefer group 0 as main editing area)
+        target_group = 0
+        if order_group == 0 and window.num_groups() > 1:
+            target_group = 1
+
+        # Focus target group before opening
+        window.focus_group(target_group)
+        window.open_file(f"{file_path}:{row}:{col}", sublime.ENCODED_POSITION)
+
+    def _find_edit_file(self, rel_path: str, line_num: int):
+        """Find full file path from relative path and line number."""
+        from .order_table import get_table, _relative_path
+
+        window = self.view.window()
+        folders = window.folders() if window else []
+        table = get_table(window)
+        if not table:
+            return None
+
+        # Handle truncated paths (starting with ...)
+        if rel_path.startswith("..."):
+            suffix = rel_path[3:]
+            for e in table.list_edits():
+                full_rel = _relative_path(e["file_path"], folders)
+                if full_rel.endswith(suffix) and e["line_num"] == line_num:
+                    return e["file_path"]
+        else:
+            for e in table.list_edits():
+                if _relative_path(e["file_path"], folders) == rel_path and e["line_num"] == line_num:
+                    return e["file_path"]
+        return None
 
 
 class ClaudeOrderDeleteCommand(sublime_plugin.TextCommand):
@@ -1684,6 +1732,304 @@ class ClaudeOrderClearDoneCommand(sublime_plugin.TextCommand):
         sublime.status_message(f"Cleared {count} done orders")
         if count > 0:
             sublime.set_timeout(lambda: refresh_order_table(window), 10)
+
+
+class ClaudeEditMessageCommand(sublime_plugin.TextCommand):
+    """Send a message to the agent who made an edit."""
+
+    def run(self, edit):
+        import re
+        import os
+        from .order_table import get_table, _relative_path
+
+        if not self.view.settings().get("order_table_view"):
+            return
+
+        # Get current line
+        sel = self.view.sel()
+        if not sel:
+            return
+
+        window = self.view.window()
+        table = get_table(window)
+        if not table:
+            return
+
+        folders = window.folders() if window else []
+
+        # Find which edit entry is selected
+        line_region = self.view.line(sel[0])
+        line = self.view.substr(line_region)
+
+        # Parse edit line: file:line ... [agent_id]
+        edit_match = re.match(r'\s+(.+?):(\d+)\s+', line)
+        if not edit_match or '[order_' in line:
+            sublime.status_message("Place cursor on an edit entry")
+            return
+
+        rel_path = edit_match.group(1).strip()
+        line_num = int(edit_match.group(2))
+
+        # Find the specific edit
+        target_edit = None
+        for e in table.list_edits():
+            full_rel = _relative_path(e["file_path"], folders)
+            if rel_path.startswith("..."):
+                matches = full_rel.endswith(rel_path[3:])
+            else:
+                matches = full_rel == rel_path
+            if matches and e["line_num"] == line_num:
+                target_edit = e
+                break
+
+        if not target_edit:
+            sublime.status_message("Could not find edit entry")
+            return
+
+        # Find the agent's session
+        agent_view_id = target_edit.get("agent_view_id", 0)
+
+        if not agent_view_id or agent_view_id not in sublime._claude_sessions:
+            # Agent gone - offer to open file instead
+            file_path = target_edit.get("file_path")
+            line_num = target_edit.get("line_num", 1)
+            if file_path:
+                self._open_in_main_group(window, file_path, line_num)
+                sublime.status_message(f"Agent {agent_view_id} gone, opened file")
+            else:
+                sublime.status_message(f"Agent session not found: {agent_view_id}")
+            return
+
+        session = sublime._claude_sessions[agent_view_id]
+
+        # Show input panel to compose message
+        file_basename = os.path.basename(target_edit["file_path"])
+        edit_line_num = target_edit["line_num"]
+        context = target_edit.get("context", "")[:40]
+
+        def on_done(message):
+            if not message.strip():
+                return
+            # Build context message about the edit
+            full_message = f"About your edit to {file_basename}:{edit_line_num}"
+            if context:
+                full_message += f" ({context})"
+            full_message += f": {message}"
+
+            if session.working:
+                session.queue_prompt(full_message)
+                sublime.status_message(f"Message queued for agent {agent_view_id}")
+            else:
+                session.query(full_message)
+                sublime.status_message(f"Message sent to agent {agent_view_id}")
+
+        window.show_input_panel(
+            f"Message to agent {agent_view_id} about edit:",
+            "",
+            on_done,
+            None,
+            None
+        )
+
+    def _open_in_main_group(self, window, file_path: str, line_num: int):
+        """Open file in main editing group, not the order table's group."""
+        order_group, _ = window.get_view_index(self.view)
+        target_group = 0
+        if order_group == 0 and window.num_groups() > 1:
+            target_group = 1
+        window.focus_group(target_group)
+        window.open_file(f"{file_path}:{line_num}:1", sublime.ENCODED_POSITION)
+
+
+class ClaudeClearEditsCommand(sublime_plugin.TextCommand):
+    """Clear edit(s) - individual, per-file, or all."""
+
+    def run(self, edit, all_edits=False):
+        import re
+        from .order_table import get_table, refresh_order_table, _relative_path
+
+        if not self.view.settings().get("order_table_view"):
+            return
+
+        window = self.view.window()
+        table = get_table(window)
+        if not table:
+            return
+
+        # If all_edits flag, clear everything
+        if all_edits:
+            table.clear_edits()
+            sublime.status_message("All edit history cleared")
+            sublime.set_timeout(lambda: refresh_order_table(window), 10)
+            return
+
+        folders = window.folders() if window else []
+
+        # Get current line
+        sel = self.view.sel()
+        if not sel:
+            return
+
+        line_region = self.view.line(sel[0])
+        line = self.view.substr(line_region)
+
+        # Parse edit line: file:line ... [agent_id]
+        edit_match = re.match(r'\s+(.+?):(\d+)\s+', line)
+        if not edit_match or '[order_' in line:
+            sublime.status_message("Place cursor on edit entry (C to clear all)")
+            return
+
+        rel_path = edit_match.group(1).strip()
+        line_num = int(edit_match.group(2))
+
+        # Find and clear the specific edit
+        for e in table.list_edits():
+            full_rel = _relative_path(e["file_path"], folders)
+            if rel_path.startswith("..."):
+                matches = full_rel.endswith(rel_path[3:])
+            else:
+                matches = full_rel == rel_path
+            if matches and e["line_num"] == line_num:
+                table.clear_edits(edit_id=e["id"])
+                sublime.status_message(f"Cleared edit {rel_path}:{line_num}")
+                sublime.set_timeout(lambda: refresh_order_table(window), 10)
+                return
+
+        sublime.status_message("Could not find edit entry")
+
+
+class ClaudeToggleEditsGroupedCommand(sublime_plugin.TextCommand):
+    """Toggle between flat and grouped-by-file edit display."""
+
+    def run(self, edit):
+        from .order_table import _views, get_table
+
+        if not self.view.settings().get("order_table_view"):
+            return
+
+        window = self.view.window()
+        table = get_table(window)
+        if not table:
+            return
+
+        key = table.project_root
+        if key in _views:
+            grouped = _views[key].toggle_edits_grouped()
+            mode = "grouped by file" if grouped else "by time"
+            sublime.status_message(f"Edits: {mode}")
+
+
+class ClaudeClearFileEditsCommand(sublime_plugin.WindowCommand):
+    """Clear all edits for the currently focused file."""
+
+    def run(self):
+        import os
+        from .order_table import get_table, refresh_order_table
+
+        view = self.window.active_view()
+        if not view or not view.file_name():
+            sublime.status_message("No file focused")
+            return
+
+        # Don't operate on order table view itself
+        if view.settings().get("order_table_view"):
+            sublime.status_message("Focus a file view first")
+            return
+
+        file_path = view.file_name()
+        table = get_table(self.window)
+        if not table:
+            sublime.status_message("No project folder")
+            return
+
+        # Check if there are edits for this file
+        edits = [e for e in table.list_edits() if e["file_path"] == file_path]
+        if not edits:
+            sublime.status_message(f"No edits for {os.path.basename(file_path)}")
+            return
+
+        table.clear_edits(file_path=file_path)
+        sublime.status_message(f"Cleared {len(edits)} edits for {os.path.basename(file_path)}")
+        refresh_order_table(self.window)
+
+
+class ClaudeFocusAgentCommand(sublime_plugin.TextCommand):
+    """Focus the agent's session view that made an edit."""
+
+    def run(self, edit):
+        import re
+        from .order_table import get_table, _relative_path
+
+        if not self.view.settings().get("order_table_view"):
+            return
+
+        window = self.view.window()
+        table = get_table(window)
+        if not table:
+            return
+
+        folders = window.folders() if window else []
+
+        # Get current line
+        sel = self.view.sel()
+        if not sel:
+            return
+
+        line_region = self.view.line(sel[0])
+        line = self.view.substr(line_region)
+
+        # Parse edit line: file:line ... [agent_id]
+        edit_match = re.match(r'\s+(.+?):(\d+)\s+', line)
+        if not edit_match or '[order_' in line:
+            sublime.status_message("Place cursor on an edit entry")
+            return
+
+        rel_path = edit_match.group(1).strip()
+        line_num = int(edit_match.group(2))
+
+        # Find the specific edit
+        target_edit = None
+        for e in table.list_edits():
+            full_rel = _relative_path(e["file_path"], folders)
+            if rel_path.startswith("..."):
+                matches = full_rel.endswith(rel_path[3:])
+            else:
+                matches = full_rel == rel_path
+            if matches and e["line_num"] == line_num:
+                target_edit = e
+                break
+
+        if not target_edit:
+            sublime.status_message("Could not find edit entry")
+            return
+
+        agent_view_id = target_edit.get("agent_view_id", 0)
+
+        # Try to focus agent session
+        if agent_view_id and agent_view_id in sublime._claude_sessions:
+            session = sublime._claude_sessions[agent_view_id]
+            if session.output.view and session.output.view.is_valid():
+                session.output.show()
+                sublime.status_message(f"Focused agent {agent_view_id}")
+                return
+
+        # Agent not available - fall back to opening file at edit location
+        file_path = target_edit.get("file_path")
+        line_num = target_edit.get("line_num", 1)
+        if file_path:
+            self._open_in_main_group(window, file_path, line_num)
+            sublime.status_message(f"Agent {agent_view_id} gone, opened file")
+        else:
+            sublime.status_message(f"Agent session not found: {agent_view_id}")
+
+    def _open_in_main_group(self, window, file_path: str, line_num: int):
+        """Open file in main editing group, not the order table's group."""
+        order_group, _ = window.get_view_index(self.view)
+        target_group = 0
+        if order_group == 0 and window.num_groups() > 1:
+            target_group = 1
+        window.focus_group(target_group)
+        window.open_file(f"{file_path}:{line_num}:1", sublime.ENCODED_POSITION)
 
 
 class ClaudePasteImageCommand(sublime_plugin.TextCommand):
