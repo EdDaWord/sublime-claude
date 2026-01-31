@@ -1,6 +1,6 @@
 """Tool routing and command parsing - self-contained unit for MCP tool dispatch."""
 import json
-from typing import Dict, Callable, Any, Optional
+from typing import Dict, Callable, Any, Optional, Tuple
 
 
 class ToolRouter:
@@ -274,7 +274,7 @@ def create_sublime_router() -> ToolRouter:
     return router
 
 
-def parse_tool_call(method: str, params: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+def parse_tool_call(method: str, params: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """Parse an MCP tool call request.
 
     Returns:

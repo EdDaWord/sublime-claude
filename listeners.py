@@ -287,8 +287,13 @@ class ClaudeOutputEventListener(sublime_plugin.ViewEventListener):
 
         return None
 
+    _in_soft_undo = False
+
     def on_modified(self):
         """Track modifications and redirect typing from history to input area."""
+        if self._in_soft_undo:
+            return
+
         s = get_session_for_view(self.view)
         if not s:
             return
@@ -310,8 +315,12 @@ class ClaudeOutputEventListener(sublime_plugin.ViewEventListener):
             insert_pos = max(current_cursor - len(chars), 0)
 
             if insert_pos < input_start:
-                # Undo the insert
-                self.view.run_command("soft_undo")
+                # Undo the insert (guard against recursion)
+                self._in_soft_undo = True
+                try:
+                    self.view.run_command("soft_undo")
+                finally:
+                    self._in_soft_undo = False
 
                 # Move cursor to end of input area
                 input_end = self.view.size()

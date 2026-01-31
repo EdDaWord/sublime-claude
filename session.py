@@ -98,6 +98,9 @@ class Session:
         self.plan_mode: bool = False
         self.plan_file: Optional[str] = None
 
+        # Pending retain content (set by compact_boundary, sent after interrupt)
+        self._pending_retain: Optional[str] = None
+
     def start(self) -> None:
         settings = sublime.load_settings("ClaudeCode.sublime-settings")
         python_path = settings.get("python_path", "python3")
@@ -367,11 +370,13 @@ class Session:
         return None
 
     def _inject_retain_midquery(self) -> None:
-        """Inject retain content mid-query via queue_prompt mechanism."""
+        """Inject retain content by interrupting and restarting with retain prompt."""
         content = self._gather_retain_content()
         if content:
-            print(f"[Claude] Injecting retain content mid-query ({len(content)} chars)")
-            self.queue_prompt(f"[retain context]\n\n{content}")
+            print(f"[Claude] Interrupting to inject retain content ({len(content)} chars)")
+            # Store retain content to send after interrupt completes
+            self._pending_retain = f"[retain context]\n\n{content}"
+            self.interrupt(break_channel=False)
 
     def _record_edit(self, tool_name: str):
         """Record an Edit/Write operation to the order table's edit log."""
@@ -698,7 +703,16 @@ class Session:
                 if session.client:
                     session.client.send("subsession_complete", {"subsession_id": view_id})
 
-        # 4. GATE: Only process deferred actions on success
+        # 4. Check for pending retain (interrupt was triggered by compact_boundary)
+        if completion == "interrupted" and self._pending_retain:
+            retain_content = self._pending_retain
+            self._pending_retain = None
+            print(f"[Claude] Sending pending retain content after interrupt")
+            self.output.text(f"\n◎ [retain] ▶\n\n")
+            self.query(retain_content, display_prompt="[retain context]")
+            return
+
+        # 5. GATE: Only process deferred actions on success
         if completion != "success":
             self.working = False
             self._clear_deferred_state()
@@ -726,6 +740,7 @@ class Session:
         """Clear deferred action state. Called on error/interrupt."""
         self._queued_prompts.clear()
         self._inject_pending = False
+        self._pending_retain = None
         self._input_mode_entered = False  # Allow re-entry to input mode
 
     def _enter_input_with_draft(self) -> None:
@@ -1147,36 +1162,45 @@ class Session:
         """Handle entering plan mode."""
         self.plan_mode = True
         self._status("plan mode")
-        self.output.text("\n⚙ *Entering plan mode...*\n")
         print(f"[Claude] Entered plan mode")
 
     def _handle_plan_mode_exit(self, params: dict) -> None:
-        """Handle exiting plan mode - show plan approval UI."""
+        """Handle exiting plan mode - show inline approval UI."""
+        from .output import PLAN_APPROVE
         plan_id = params.get("id")
         tool_input = params.get("tool_input", {})
 
         # Find the most recent plan file
         plan_file = self._find_plan_file()
         self.plan_file = plan_file
-
-        # Show plan summary in output
         allowed_prompts = tool_input.get("allowedPrompts", [])
-        self.output.text("\n⚙ *Plan complete. Awaiting approval...*\n")
-        if allowed_prompts:
-            self.output.text(f"  Requested permissions: {len(allowed_prompts)}\n")
-            for p in allowed_prompts[:5]:
-                self.output.text(f"    • {p.get('tool', 'unknown')}: {p.get('prompt', '')}\n")
-            if len(allowed_prompts) > 5:
-                self.output.text(f"    ... and {len(allowed_prompts) - 5} more\n")
 
-        # Open plan file in a new view if found
+        def on_response(response: str):
+            approved = response == PLAN_APPROVE
+            self.plan_mode = False
+
+            if self.client:
+                self.client.send("plan_response", {
+                    "id": plan_id,
+                    "approved": approved,
+                })
+
+            if approved:
+                self._status("implementing...")
+            else:
+                self._status("ready")
+
+        # Show inline approval block (like permission UI)
+        self.output.plan_approval_request(
+            plan_id=plan_id,
+            plan_file=plan_file or "",
+            allowed_prompts=allowed_prompts,
+            callback=on_response,
+        )
+
+        # Open plan file if found
         if plan_file and os.path.exists(plan_file):
-            plan_view = self.window.open_file(plan_file)
-            # Position side by side
-            self.window.set_view_index(plan_view, 1, 0)
-
-        # Show approval quick panel
-        self._show_plan_approval(plan_id)
+            self.window.open_file(plan_file)
 
     def _find_plan_file(self) -> Optional[str]:
         """Find the most recent plan file in ~/.claude/plans/."""
@@ -1189,49 +1213,7 @@ class Session:
         if not plan_files:
             return None
 
-        # Return most recently modified
         return max(plan_files, key=os.path.getmtime)
-
-    def _show_plan_approval(self, plan_id: int) -> None:
-        """Show quick panel for plan approval."""
-        items = [
-            ["✓ Approve Plan", "Proceed with implementation"],
-            ["↻ Continue Planning", "Let Claude refine the plan further"],
-            ["✗ Cancel", "Reject and stop"],
-        ]
-
-        def on_select(idx: int) -> None:
-            if idx == -1:
-                # Dismissed - treat as continue
-                approved = None
-            elif idx == 0:
-                approved = True
-                self.plan_mode = False
-            elif idx == 1:
-                approved = None  # Continue planning
-            else:
-                approved = False
-                self.plan_mode = False
-
-            # Send response to bridge
-            if self.client:
-                self.client.send("plan_response", {
-                    "id": plan_id,
-                    "approved": approved,
-                })
-
-            if approved:
-                self.output.text("\n✓ *Plan approved. Starting implementation...*\n")
-                self._status("implementing...")
-            elif approved is False:
-                self.output.text("\n✗ *Plan rejected.*\n")
-                self._status("ready")
-
-        self.window.show_quick_panel(
-            items,
-            on_select,
-            placeholder="Review plan and choose action"
-        )
 
     # ─── Notification API (notalone2) ──────────────────────────────────
 

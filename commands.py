@@ -1279,19 +1279,21 @@ class ClaudeInsertNewlineCommand(sublime_plugin.TextCommand):
 # --- Permission Commands ---
 
 class ClaudePermissionAllowCommand(sublime_plugin.TextCommand):
-    """Handle Y key - allow permission."""
+    """Handle Y key - allow permission or approve plan."""
     def run(self, edit):
         s = get_session_for_view(self.view)
         if s:
-            s.output.handle_permission_key("y")
+            if not s.output.handle_plan_key("y"):
+                s.output.handle_permission_key("y")
 
 
 class ClaudePermissionDenyCommand(sublime_plugin.TextCommand):
-    """Handle N key - deny permission."""
+    """Handle N key - deny permission or reject plan."""
     def run(self, edit):
         s = get_session_for_view(self.view)
         if s:
-            s.output.handle_permission_key("n")
+            if not s.output.handle_plan_key("n"):
+                s.output.handle_permission_key("n")
 
 
 class ClaudePermissionAllowSessionCommand(sublime_plugin.TextCommand):

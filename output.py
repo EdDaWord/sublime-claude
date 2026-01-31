@@ -19,6 +19,21 @@ PERM_ALLOW_ALL = "allow_all"
 PERM_ALLOW_SESSION = "allow_session"  # Allow same tool for 30s
 
 
+PLAN_APPROVE = "approve"
+PLAN_REJECT = "reject"
+
+
+@dataclass
+class PlanApproval:
+    """A pending plan approval request."""
+    id: int
+    plan_file: str
+    allowed_prompts: List[dict]
+    callback: Callable[[str], None]  # Called with PLAN_APPROVE or PLAN_REJECT
+    region: tuple = (0, 0)
+    button_regions: Dict[str, tuple] = field(default_factory=dict)
+
+
 @dataclass
 class PermissionRequest:
     """A pending permission request."""
@@ -86,6 +101,7 @@ class OutputView:
         self.current: Optional[Conversation] = None
         self.pending_permission: Optional[PermissionRequest] = None
         self._permission_queue: List[PermissionRequest] = []  # Queue for multiple requests
+        self.pending_plan: Optional[PlanApproval] = None
         self.auto_allow_tools: set = set()  # Tools auto-allowed for this session
         self._last_allowed_tool: Optional[str] = None  # Track last tool we allowed
         self._last_allowed_time: float = 0  # Timestamp of last allow
@@ -633,6 +649,10 @@ class OutputView:
         if self.pending_permission:
             self._remove_permission_block()
             self.pending_permission = None
+        # Clear any pending plan approval
+        if self.pending_plan:
+            self._clear_plan_approval()
+            self.pending_plan = None
         # Append interrupted text
         self.current.events.append("\n\n*[interrupted]*\n")
         self._render_current()
@@ -658,6 +678,7 @@ class OutputView:
         self.current = None
         self.pending_permission = None
         self._permission_queue.clear()
+        self.pending_plan = None
         self.auto_allow_tools.clear()
         self._pending_context_region = (0, 0)
         self._input_mode = False
@@ -1206,6 +1227,131 @@ class OutputView:
             return True
         return False
 
+    # --- Plan Approval UI ---
+
+    def plan_approval_request(self, plan_id: int, plan_file: str,
+                               allowed_prompts: list, callback: Callable[[str], None]) -> None:
+        """Show an inline plan approval block."""
+        self.show(focus=False)
+
+        if self.view:
+            self.view.settings().set("claude_input_mode", False)
+
+        self.pending_plan = PlanApproval(
+            id=plan_id,
+            plan_file=plan_file,
+            allowed_prompts=allowed_prompts,
+            callback=callback,
+        )
+        self._render_plan_approval()
+        self._scroll_to_end()
+
+    def _render_plan_approval(self) -> None:
+        """Render the plan approval block in the view."""
+        if not self.pending_plan or not self.view:
+            return
+
+        plan = self.pending_plan
+        lines = ["\n"]
+
+        # Header
+        lines.append("  ⚙ Plan complete — approve to start implementation\n")
+
+        # Plan file
+        if plan.plan_file:
+            import os
+            basename = os.path.basename(plan.plan_file)
+            lines.append(f"    plan: {basename}\n")
+
+        # Allowed prompts summary
+        if plan.allowed_prompts:
+            lines.append(f"    permissions: {len(plan.allowed_prompts)}\n")
+            for p in plan.allowed_prompts[:3]:
+                tool = p.get("tool", "?")
+                prompt = p.get("prompt", "")
+                lines.append(f"      • {tool}: {prompt}\n")
+            if len(plan.allowed_prompts) > 3:
+                lines.append(f"      ... and {len(plan.allowed_prompts) - 3} more\n")
+
+        # Buttons
+        lines.append("    ")
+        text_before_buttons = "".join(lines)
+
+        btn_y = "[Y] Approve"
+        btn_n = "[N] Reject"
+
+        lines.append(btn_y)
+        lines.append("  ")
+        lines.append(btn_n)
+        lines.append("\n")
+
+        text = "".join(lines)
+
+        # Write to view
+        start = self.view.size()
+        end = self._write(text)
+        plan.region = (start, end)
+
+        # Track region
+        self.view.add_regions(
+            "claude_plan_block",
+            [sublime.Region(start, end)],
+            "", "", sublime.HIDDEN,
+        )
+
+        # Button regions
+        btn_start = start + len(text_before_buttons)
+        plan.button_regions[PLAN_APPROVE] = (btn_start, btn_start + len(btn_y))
+        btn_start += len(btn_y) + 2
+        plan.button_regions[PLAN_REJECT] = (btn_start, btn_start + len(btn_n))
+
+        # Highlight buttons
+        for btn_type, (bs, be) in plan.button_regions.items():
+            self.view.add_regions(
+                f"claude_plan_btn_{btn_type}",
+                [sublime.Region(bs, be)],
+                f"claude.permission.button.{'allow' if btn_type == PLAN_APPROVE else 'deny'}",
+                "", sublime.DRAW_NO_OUTLINE,
+            )
+
+    def _clear_plan_approval(self) -> None:
+        """Remove plan approval block from view."""
+        if not self.pending_plan or not self.view:
+            return
+
+        for btn_type in self.pending_plan.button_regions:
+            self.view.erase_regions(f"claude_plan_btn_{btn_type}")
+
+        regions = self.view.get_regions("claude_plan_block")
+        if regions:
+            self._replace(regions[0].begin(), regions[0].end(), "")
+        self.view.erase_regions("claude_plan_block")
+
+    def handle_plan_key(self, key: str) -> bool:
+        """Handle Y/N key for plan approval. Returns True if handled."""
+        if not self.pending_plan:
+            return False
+        if self.pending_plan.callback is None:
+            return False
+
+        plan = self.pending_plan
+        key = key.lower()
+
+        if key == "y":
+            response = PLAN_APPROVE
+        elif key == "n":
+            response = PLAN_REJECT
+        else:
+            return False
+
+        callback = plan.callback
+        plan.callback = None
+        self._clear_plan_approval()
+        self.pending_plan = None
+        self._move_cursor_to_end()
+        callback(response)
+        return True
+
     def _render_current(self, auto_scroll: bool = True) -> None:
         """Re-render current conversation in place (debounced)."""
         if not self.current or not self.view:
@@ -1318,7 +1464,11 @@ class OutputView:
         # If there's content after our region, extend end to clean it up
         # This handles race conditions where content was orphaned from previous renders
         # BUT: Don't extend if there's a permission block - that's intentional content after the region
-        if end < view_size and not (self.pending_permission and self.pending_permission.callback):
+        has_trailing_ui = (
+            (self.pending_permission and self.pending_permission.callback) or
+            (self.pending_plan and self.pending_plan.callback)
+        )
+        if end < view_size and not has_trailing_ui:
             end = view_size
         new_end = self._replace(start, end, text)
         self.current.region = (start, new_end)
