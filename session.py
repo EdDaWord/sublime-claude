@@ -814,11 +814,17 @@ class Session:
                           Set to False when interrupt is from channel message.
         """
         if self.client:
-            self.client.send("interrupt", {})
+            sent = self.client.send("interrupt", {})
             self._status("interrupting...")
-            self.working = False
-            # Clear pending state but don't touch _input_mode_entered yet
+            # Don't set working=False here — wait for _on_done to confirm
+            # the bridge actually stopped. This prevents input mode race.
             self._queued_prompts.clear()
+            # If bridge is dead, _on_done won't fire — force cleanup
+            if not sent:
+                self.working = False
+                self._status("error: bridge died")
+                self.output.text("\n\n*Bridge process died. Please restart the session.*\n")
+                self._enter_input_with_draft()
 
         # Break any active channel connection (only for user-initiated interrupts)
         if break_channel and self.output.view:

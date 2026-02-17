@@ -142,11 +142,12 @@ class OutputView:
         self.view.set_scratch(True)
         self.view.set_read_only(True)
         self.view.settings().set("claude_output", True)
-        self.view.settings().set("word_wrap", True)
-        self.view.settings().set("gutter", True)
-        self.view.settings().set("line_numbers", False)
-        self.view.settings().set("fold_buttons", True)
-        self.view.settings().set("font_size", 12)
+        output_settings = sublime.load_settings("ClaudeOutput.sublime-settings")
+        for key in ("font_size", "line_numbers", "gutter", "word_wrap", "margin",
+                     "draw_indent_guides", "highlight_line", "fold_buttons"):
+            val = output_settings.get(key)
+            if val is not None:
+                self.view.settings().set(key, val)
         try:
             self.view.assign_syntax("Packages/ClaudeCode/ClaudeOutput.sublime-syntax")
             self.view.settings().set("color_scheme", "Packages/ClaudeCode/ClaudeOutput.hidden-tmTheme")
@@ -250,6 +251,12 @@ class OutputView:
             # print(f"[Claude] enter_input_mode: already in input mode, returning")
             return  # Already in input mode
 
+        # Check session-level working flag (authoritative busy state)
+        from . import claude_code
+        session = claude_code.get_session_for_view(self.view)
+        if session and session.working:
+            return  # Can't input while session is busy
+
         # Exit any current conversation's working state
         if self.current and self.current.working:
             # print(f"[Claude] enter_input_mode: current conversation is working, can't enter input mode")
@@ -265,8 +272,6 @@ class OutputView:
         # Safety: check for and clean up any stale input markers from previous sessions
         # This can happen after Sublime restart when OutputView state is lost but view content remains
         # BUT: Don't clean up fresh context that was just added
-        from . import claude_code
-        session = claude_code.get_session_for_view(self.view)
         has_pending_context = session and session.pending_context
         # print(f"[Claude] enter_input_mode: has_pending_context={has_pending_context}, pending_context={session.pending_context if session else None}")
 

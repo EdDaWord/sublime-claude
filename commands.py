@@ -1386,6 +1386,8 @@ class ClaudeEnterInputModeCommand(sublime_plugin.TextCommand):
     def run(self, edit):
         s = get_session_for_view(self.view)
         if s:
+            if s.working:
+                return  # Don't enter input mode while busy
             s.output.enter_input_mode()
             if s.draft_prompt:
                 self.view.run_command("append", {"characters": s.draft_prompt})
