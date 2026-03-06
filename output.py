@@ -1575,20 +1575,9 @@ class OutputView:
                 self._advance_question()
             return True
 
-        # O key - other (custom input)
+        # O key - other (custom input via inline input mode)
         if key == "o":
-            def on_input(text):
-                if text.strip():
-                    q_req.answers[str(q_req.current_idx)] = text.strip()
-                    self._clear_question(f"{header} → {text.strip()}")
-                    self._advance_question()
-
-            def on_cancel():
-                # Don't cancel the whole question, just dismiss the input panel
-                pass
-
-            question_text = q.get("question", "")
-            self.window.show_input_panel(question_text, "", on_input, None, on_cancel)
+            self._question_enter_input_mode()
             return True
 
         # Enter - confirm multi-select
@@ -1608,6 +1597,63 @@ class OutputView:
 
         # Escape handled by interrupt flow
         return False
+
+    def _question_enter_input_mode(self) -> None:
+        """Enter inline input mode for free-text question answer."""
+        if not self.view or not self.pending_question:
+            return
+
+        # Append input prompt after question block
+        self.view.set_read_only(False)
+        marker = "    ▸ "
+        self.view.run_command("append", {"characters": marker})
+        self._question_input_start = self.view.size()
+        self._question_input_mode = True
+
+        # Set standard input mode so keyboard/selection handling works
+        self._input_start = self._question_input_start
+        self._input_mode = True
+        self.view.settings().set("claude_input_mode", True)
+
+        # Move cursor to input position
+        self.view.sel().clear()
+        self.view.sel().add(sublime.Region(self._question_input_start, self._question_input_start))
+        self.view.show(self._question_input_start)
+
+    def submit_question_input(self) -> bool:
+        """Submit free-text input for question. Returns True if handled."""
+        if not getattr(self, '_question_input_mode', False):
+            return False
+        if not self.pending_question or not self.view:
+            self._question_input_mode = False
+            return False
+
+        # Get typed text
+        text = self.view.substr(sublime.Region(self._question_input_start, self.view.size())).strip()
+        self._question_input_mode = False
+        self._input_mode = False
+        self.view.settings().set("claude_input_mode", False)
+        self.view.set_read_only(True)
+
+        # Remove the input line
+        marker_start = self._question_input_start - len("    ▸ ")
+        self.view.set_read_only(False)
+        self.view.run_command("claude_replace", {
+            "start": max(0, marker_start),
+            "end": self.view.size(),
+            "text": ""
+        })
+        self.view.set_read_only(True)
+
+        if text:
+            q_req = self.pending_question
+            q = q_req.questions[q_req.current_idx]
+            header = q.get("header", f"Q{q_req.current_idx + 1}")
+            q_req.answers[str(q_req.current_idx)] = text
+            self._clear_question(f"{header} → {text}")
+            self._advance_question()
+
+        return True
 
     def _render_current(self, auto_scroll: bool = True) -> None:
         """Re-render current conversation in place (debounced)."""

@@ -1345,6 +1345,10 @@ class ClaudeSubmitInputCommand(sublime_plugin.TextCommand):
         if not s:
             return
 
+        # Check for question free-text input first
+        if s.output.submit_question_input():
+            return
+
         if not s.output.is_input_mode():
             return
 
