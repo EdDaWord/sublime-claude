@@ -582,7 +582,12 @@ class OutputView:
             # print(f"[Claude] prompt: writing without context: {repr(line)}")
         end = self._write(line)
         self.current.region = (start, end)
-        # print(f"[Claude] prompt: wrote prompt at region ({start}, {end}), view_size={self.view.size()}")
+        # Track with Sublime region so it auto-adjusts when view content shifts
+        self.view.add_regions(
+            "claude_conversation",
+            [sublime.Region(start, end)],
+            "", "", sublime.HIDDEN,
+        )
         self._scroll_to_end()
 
     def tool(self, name: str, tool_input: dict = None) -> None:
@@ -1683,22 +1688,23 @@ class OutputView:
         if self._input_mode:
             return
 
-        # Validate region bounds - protect against stale region data
+        # Read region from Sublime's tracked region (auto-adjusts when view shifts)
         view_size = self.view.size()
-        start, end = self.current.region
+        tracked = self.view.get_regions("claude_conversation")
+        if tracked and tracked[0].size() > 0:
+            start, end = tracked[0].begin(), tracked[0].end()
+        else:
+            # Fallback to tuple
+            start, end = self.current.region
         if start > view_size or end > view_size:
             # Region is invalid - recalculate from view content
-            # Find last prompt marker and use that as start
             content = self.view.substr(sublime.Region(0, view_size))
-            # Look for the last prompt marker that matches our prompt
             prompt_marker = f"◎ {self.current.prompt[:20]}"
             last_pos = content.rfind(prompt_marker)
             if last_pos >= 0:
                 start = last_pos
                 end = view_size
-                self.current.region = (start, end)
             else:
-                # Can't find our prompt - skip this render
                 return
 
         # Build the full text for this conversation
@@ -1761,8 +1767,10 @@ class OutputView:
 
         text = "".join(lines)
 
-        # Replace the region
-        start, end = self.current.region
+        # Replace the region (re-read tracked region for latest bounds)
+        tracked = self.view.get_regions("claude_conversation")
+        if tracked and tracked[0].size() > 0:
+            start, end = tracked[0].begin(), tracked[0].end()
         view_size = self.view.size()
         # If there's content after our region, extend end to clean it up
         # This handles race conditions where content was orphaned from previous renders
@@ -1790,6 +1798,11 @@ class OutputView:
             end = view_size
         new_end = self._replace(start, end, text)
         self.current.region = (start, new_end)
+        self.view.add_regions(
+            "claude_conversation",
+            [sublime.Region(start, new_end)],
+            "", "", sublime.HIDDEN,
+        )
 
         # Update title to reflect working state
         self._update_title()
