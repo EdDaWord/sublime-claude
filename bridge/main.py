@@ -807,6 +807,15 @@ You are subsession **{subsession_id}**. Call signal_complete(session_id={view_id
 
         prompt = params.get("prompt", "")
         images = params.get("images", [])
+
+        # Cancel any still-running previous query (e.g. after interrupt)
+        if self.current_task and not self.current_task.done():
+            self.current_task.cancel()
+            try:
+                await self.current_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
         self.interrupted = False  # Reset at start of query
         self.query_id = id  # Store for inject_message to know query is active
 
@@ -846,10 +855,11 @@ You are subsession **{subsession_id}**. Call signal_complete(session_id={view_id
                 await self.client.query(prompt)
             # Drain stale messages before reading response
             await _drain_stale()
-            # Stream responses
+            # Stream responses (stop emitting if interrupted)
             async for message in self.client.receive_response():
+                if self.interrupted:
+                    continue  # Drain remaining messages without emitting
                 await self.emit_message(message)
-            # Check if we were interrupted (set by interrupt() method)
             status = "interrupted" if self.interrupted else "complete"
             with open("/tmp/claude_bridge.log", "a") as f:
                 f.write(f"query complete: status={status}\n")

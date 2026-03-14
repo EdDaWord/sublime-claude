@@ -38,7 +38,7 @@ class ClaudeCodeEventListener(sublime_plugin.EventListener):
         }
         print(f"[Claude] copy tracked: {path} regions={regions}")
 
-    def on_window_command(self, window: sublime.Window, command: str, args: dict) -> None:
+    def on_window_command(self, window: sublime.Window, command: str, args: dict):
         if command == "close_window":
             # Stop all sessions in this window
             to_remove = []
@@ -48,6 +48,32 @@ class ClaudeCodeEventListener(sublime_plugin.EventListener):
                     to_remove.append(view_id)
             for view_id in to_remove:
                 del sublime._claude_sessions[view_id]
+
+        # Intercept close/close_all/close_others for claude output views
+        if command in ("close", "close_by_index"):
+            view = window.active_view()
+            # close_by_index passes group/index args — resolve to the actual view
+            if command == "close_by_index" and args:
+                group = args.get("group", 0)
+                index = args.get("index", 0)
+                views = window.views_in_group(group)
+                if index < len(views):
+                    view = views[index]
+            if view and view.settings().get("claude_output"):
+                session = sublime._claude_sessions.get(view.id())
+                if session and session.initialized:
+                    def _ask():
+                        s = sublime._claude_sessions.get(view.id())
+                        if not s or not s.initialized:
+                            view.close()
+                            return
+                        if sublime.ok_cancel_dialog("Close this Claude session?", "Close"):
+                            s.stop()
+                            if view.id() in sublime._claude_sessions:
+                                del sublime._claude_sessions[view.id()]
+                            view.close()
+                    sublime.set_timeout(_ask, 0)
+                    return ("noop",)  # Cancel the original close
 
     def on_activated(self, view: sublime.View) -> None:
         """Handle view activated - check if it's for context adding from goto."""

@@ -240,10 +240,6 @@ class OutputView:
             self.view.show(self._input_start, keep_to_left=False, animate=False)
             return
 
-        # Always scroll during active streaming
-        if self.current and self.current.working:
-            force = True
-
         # Check if we should auto-scroll
         if not force:
             sel = self.view.sel()
@@ -252,7 +248,7 @@ class OutputView:
                 size = self.view.size()
                 # Only auto-scroll if cursor is near end (within 200 chars)
                 if size > 200 and cursor < size - 200:
-                    return  # User scrolled up, don't auto-scroll
+                    return  # User is viewing history, don't auto-scroll
 
         # Scroll to end without moving cursor
         end = self.view.size()
@@ -1696,30 +1692,17 @@ class OutputView:
         sublime.set_timeout(self._do_render, 10)
 
     def advance_spinner(self) -> None:
-        """Advance spinner animation frame and update only the spinner character."""
+        """Advance spinner animation frame and re-render if working."""
         if not self.current or not self.current.working or not self.view:
             return
         self._spinner_frame += 1
-        # Only replace the spinner character in-place instead of re-rendering everything
-        tracked = self.view.get_regions("claude_spinner")
-        if tracked and tracked[0].size() == 1:
-            spinner = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
-            self.view.set_read_only(False)
-            self.view.run_command("claude_replace", {
-                "start": tracked[0].begin(),
-                "end": tracked[0].end(),
-                "text": spinner,
-            })
-            self.view.set_read_only(True)
-            # Re-track the spinner region
-            pos = tracked[0].begin()
-            self.view.add_regions("claude_spinner", [sublime.Region(pos, pos + 1)], "", "", sublime.HIDDEN)
-        else:
-            # No spinner region tracked yet — full re-render will create it
-            self._render_current(auto_scroll=False)
+        self._render_current(auto_scroll=False)
         # Periodically clear undo history to prevent memory bloat
         if self._spinner_frame % 50 == 0:
-            self.view.buffer().clear_undo_stack()
+            try:
+                self.view.clear_undo_stack()
+            except AttributeError:
+                pass  # Not available in older Sublime builds
 
     def _do_render(self) -> None:
         """Actually perform the render."""
@@ -1854,18 +1837,6 @@ class OutputView:
             [sublime.Region(start, new_end)],
             "", "", sublime.HIDDEN,
         )
-
-        # Track spinner character position for efficient in-place updates
-        if self.current.working:
-            spinner = SPINNER_FRAMES[self._spinner_frame % len(SPINNER_FRAMES)]
-            # Find "  X\n" pattern in rendered region
-            rendered = self.view.substr(sublime.Region(start, new_end))
-            spinner_offset = rendered.find(f"  {spinner}\n")
-            if spinner_offset >= 0:
-                spinner_pos = start + spinner_offset + 2  # skip the 2 spaces
-                self.view.add_regions("claude_spinner", [sublime.Region(spinner_pos, spinner_pos + 1)], "", "", sublime.HIDDEN)
-        else:
-            self.view.erase_regions("claude_spinner")
 
         # Update title to reflect working state
         self._update_title()

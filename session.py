@@ -1020,8 +1020,8 @@ class Session:
                 "total_cost": self.total_cost,
                 "query_count": self.query_count,
             })
-        # Keep only last 20 sessions
-        sessions = sessions[:20]
+        # Keep only last 50 sessions
+        sessions = sessions[:50]
         save_sessions(sessions)
 
     def _status(self, text: str) -> None:
@@ -1041,16 +1041,16 @@ class Session:
             parts.append(f"${self.total_cost:.4f}")
         if self.query_count > 0:
             parts.append(f"{self.query_count}q")
-        # Show context usage percentage
+        # Show context token count
         if self.context_usage:
-            pct = self._context_pct()
-            if pct is not None:
-                parts.append(f"ctx:{pct}%")
+            ctx_k = self._context_tokens_k()
+            if ctx_k is not None:
+                parts.append(f"ctx:{ctx_k}k")
         status = " | ".join(parts) if parts else "Claude"
         self.output.view.set_status("claude_session", f"Claude: {status}")
 
-    def _context_pct(self) -> Optional[int]:
-        """Estimate context usage percentage from latest usage data."""
+    def _context_tokens_k(self) -> Optional[int]:
+        """Get context token count in thousands from latest usage data."""
         if not self.context_usage:
             return None
         u = self.context_usage
@@ -1059,15 +1059,7 @@ class Session:
                  + u.get("cache_creation_input_tokens", 0))
         if not input_t:
             return None
-        # Claude models context windows
-        model = (self.profile or {}).get("model", "sonnet")
-        if "opus" in str(model).lower():
-            ctx_limit = 200000
-        elif "haiku" in str(model).lower():
-            ctx_limit = 200000
-        else:
-            ctx_limit = 200000  # sonnet/default
-        return min(100, int(input_t / ctx_limit * 100))
+        return max(1, input_t // 1000)
 
     def _clear_status(self) -> None:
         if self.output.view and self.output.view.is_valid():
