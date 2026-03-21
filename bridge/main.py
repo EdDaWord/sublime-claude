@@ -694,7 +694,7 @@ You are subsession **{subsession_id}**. Call signal_complete(session_id={view_id
         })
 
         try:
-            answers = await asyncio.wait_for(future, timeout=300)
+            answers = await future
             with open("/tmp/claude_bridge.log", "a") as f:
                 f.write(f"AskUserQuestion response: qid={qid}, answers={answers}\n")
 
@@ -703,8 +703,6 @@ You are subsession **{subsession_id}**. Call signal_complete(session_id={view_id
 
             updated_input = {"questions": questions, "answers": answers}
             return PermissionResultAllow(updated_input=updated_input)
-        except asyncio.TimeoutError:
-            return PermissionResultDeny(message="Question timed out")
         finally:
             self.pending_questions.pop(qid, None)
 
