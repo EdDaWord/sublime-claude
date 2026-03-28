@@ -309,6 +309,7 @@ class MCPSocketServer:
             "list_tools": self._list_tools,
             # Session tools
             "list_profiles": self._list_profiles,
+            "list_personas": self._list_personas,
             "spawn_session": self._spawn_session,
             "send_to_session": self._send_to_session,
             "list_sessions": self._list_sessions,
@@ -743,7 +744,38 @@ class MCPSocketServer:
 
         return {"summary": "\n".join(lines), "profiles": profile_names, "checkpoints": checkpoint_names}
 
-    def _spawn_session(self, prompt: str, name: str = None, profile: str = None, checkpoint: str = None, fork_current: bool = False, wait_for_completion: bool = False, _caller_view_id: int = None) -> dict:
+    def _list_personas(self) -> dict:
+        """List available personas from the persona server."""
+        import urllib.request
+        import json as json_mod
+        settings = sublime.load_settings("ClaudeCode.sublime-settings")
+        persona_url = settings.get("persona_url", "http://localhost:5002/personas")
+        try:
+            req = urllib.request.Request(f"{persona_url}/", method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                personas = json_mod.loads(resp.read().decode())
+        except Exception as e:
+            return {"error": f"Failed to fetch personas: {e}"}
+        lines = []
+        for p in personas:
+            alias = p.get("alias", "?")
+            pid = p.get("id", "?")
+            locked = p.get("is_locked", False)
+            locked_by = p.get("locked_by_session", "")
+            tags = ", ".join(p.get("tags", []))
+            status = f"🔒 {locked_by}" if locked else "available"
+            line = f"  [{pid}] {alias} ({status})"
+            if tags:
+                line += f" [{tags}]"
+            lines.append(line)
+        if not lines:
+            return {"summary": "No personas available", "personas": []}
+        return {
+            "summary": f"Personas ({len(lines)}):\n" + "\n".join(lines),
+            "personas": [{"id": p.get("id"), "alias": p.get("alias"), "is_locked": p.get("is_locked", False)} for p in personas]
+        }
+
+    def _spawn_session(self, prompt: str, name: str = None, profile: str = None, checkpoint: str = None, persona_id: int = None, fork_current: bool = False, wait_for_completion: bool = False, _caller_view_id: int = None) -> dict:
         """Spawn a new Claude session with the given prompt. Returns with _wait_for_init flag.
 
         Args:
@@ -768,6 +800,27 @@ class MCPSocketServer:
             if profile not in profiles:
                 return {"error": f"Profile '{profile}' not found"}
             profile_config = profiles[profile]
+
+        # Load persona config if specified (overrides profile)
+        if persona_id:
+            import urllib.request
+            import json as json_mod
+            settings = sublime.load_settings("ClaudeCode.sublime-settings")
+            persona_url = settings.get("persona_url", "http://localhost:5002/personas")
+            try:
+                req = urllib.request.Request(f"{persona_url}/{persona_id}", method="GET")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    persona = json_mod.loads(resp.read().decode())
+            except Exception as e:
+                return {"error": f"Failed to fetch persona: {e}"}
+            # Get system_prompt from ability_version or persona top-level
+            ability_version = persona.get("ability_version") or {}
+            profile_config = {
+                "model": ability_version.get("model") or "sonnet",
+                "system_prompt": ability_version.get("system_prompt") or persona.get("system_prompt") or "",
+            }
+            if not name:
+                name = persona.get("alias", f"persona-{persona_id}")
 
         # Fork from current session if requested
         if fork_current:

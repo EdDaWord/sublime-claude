@@ -159,6 +159,11 @@ def handle_request(request: dict) -> dict:
                     "inputSchema": {"type": "object", "properties": {}}
                 },
                 {
+                    "name": "list_personas",
+                    "description": "List available personas from the persona server. Shows alias, tags, lock status, and model.",
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
                     "name": "spawn_session",
                     "description": "Spawn a new Claude subsession. Returns view_id. Use fork_current=true to share your full conversation context with the subsession — it sees everything you've learned so far (files read, decisions made, codebase understanding) without re-discovering it. This is the preferred way to parallelize work. Use profile for specialized configurations (e.g. 1M context model with preloaded docs).",
                     "inputSchema": {
@@ -168,6 +173,7 @@ def handle_request(request: dict) -> dict:
                             "name": {"type": "string", "description": "Optional: name for the session"},
                             "profile": {"type": "string", "description": "Optional: profile name from list_profiles"},
                             "checkpoint": {"type": "string", "description": "Optional: checkpoint name to fork from"},
+                            "persona_id": {"type": "integer", "description": "Optional: persona ID from list_personas to acquire and use"},
                             "fork_current": {"type": "boolean", "description": "Optional: fork from the current session (preserves conversation history). Default: false"},
                             "wait_for_completion": {"type": "boolean", "description": "Optional: wait for prompt to finish processing (default: false). Set true only for quick tasks."}
                         },

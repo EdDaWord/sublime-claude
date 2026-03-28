@@ -1429,7 +1429,13 @@ class OutputView:
 
         if key == "v":
             if plan.plan_file:
-                sublime.active_window().open_file(plan.plan_file)
+                view = sublime.active_window().open_file(plan.plan_file)
+                def enable_wrap(v=view):
+                    if v.is_loading():
+                        sublime.set_timeout(lambda: enable_wrap(v), 100)
+                        return
+                    v.settings().set("word_wrap", True)
+                enable_wrap()
             return True
 
         if key == "y":
