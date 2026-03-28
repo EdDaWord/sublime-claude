@@ -775,7 +775,7 @@ class MCPSocketServer:
             "personas": [{"id": p.get("id"), "alias": p.get("alias"), "is_locked": p.get("is_locked", False)} for p in personas]
         }
 
-    def _spawn_session(self, prompt: str, name: str = None, profile: str = None, checkpoint: str = None, persona_id: int = None, fork_current: bool = False, wait_for_completion: bool = False, _caller_view_id: int = None) -> dict:
+    def _spawn_session(self, prompt: str, name: str = None, profile: str = None, checkpoint: str = None, persona_id: int = None, fork_current: bool = False, wait_for_completion: bool = False, backend: str = "claude", _caller_view_id: int = None) -> dict:
         """Spawn a new Claude session with the given prompt. Returns with _wait_for_init flag.
 
         Args:
@@ -856,7 +856,7 @@ class MCPSocketServer:
         }
 
         # Create new session with initial context
-        session = create_session(window, resume_id=resume_id, fork=fork, profile=profile_config, initial_context=initial_context)
+        session = create_session(window, resume_id=resume_id, fork=fork, profile=profile_config, initial_context=initial_context, backend=backend)
         if name:
             session.name = name
             session.output.set_name(name)
