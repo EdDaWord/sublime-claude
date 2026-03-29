@@ -236,7 +236,11 @@ class CodexBridge:
                 "threadId": self.thread_id,
                 "turnId": self.turn_id,
             })
-        send_result(req_id, {"ok": True})
+        # Complete the pending query RPC as interrupted
+        if self._query_req_id is not None:
+            send_result(self._query_req_id, {"status": "interrupted"})
+            self._query_req_id = None
+        send_result(req_id, {"status": "interrupted"})
 
     async def handle_permission_response(self, req_id: int, params: dict) -> None:
         """Forward permission response to codex."""
@@ -464,8 +468,8 @@ class CodexBridge:
 
             send_notification("permission_request", {
                 "id": perm_id,
-                "tool_name": "Bash",
-                "tool_input": {"command": command, "description": command[:80]},
+                "tool": "Bash",
+                "input": {"command": command, "description": command[:80]},
             })
 
         elif method in ("item/fileChange/requestApproval", "applyPatchApproval"):
@@ -475,8 +479,8 @@ class CodexBridge:
 
             send_notification("permission_request", {
                 "id": perm_id,
-                "tool_name": "Edit",
-                "tool_input": {"file_path": params.get("grantRoot", ""), "reason": params.get("reason", "")},
+                "tool": "Edit",
+                "input": {"file_path": params.get("grantRoot", ""), "reason": params.get("reason", "")},
             })
 
         elif method == "item/tool/requestUserInput":

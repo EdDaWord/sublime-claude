@@ -87,8 +87,6 @@ class CopilotBridge:
         }
         if system_prompt:
             config["system_message"] = {"content": system_prompt}
-        if resume_id:
-            config["session_id"] = resume_id
 
         # MCP server config
         mcp_server_path = os.path.join(
@@ -104,10 +102,13 @@ class CopilotBridge:
             }
 
         self._session_config = config
-        log(f"Session config: mcp_servers={'sublime' in config.get('mcp_servers', {})}, model={model}")
-        self.session = await self.client.create_session(config)
+        log(f"Session config: mcp_servers={'sublime' in config.get('mcp_servers', {})}, model={model}, resume={resume_id}")
+        if resume_id:
+            self.session = await self.client.resume_session(resume_id, config)
+        else:
+            self.session = await self.client.create_session(config)
         self.session.on(self._on_event)
-        self.session_id = getattr(self.session, 'session_id', None) or f"copilot-{view_id}"
+        self.session_id = getattr(self.session, 'session_id', None) or resume_id or f"copilot-{view_id}"
 
         log(f"Initialized: model={model}, cwd={cwd}, session_id={self.session_id}")
         send_result(req_id, {
@@ -152,9 +153,14 @@ class CopilotBridge:
     async def handle_interrupt(self, req_id: int) -> None:
         if self.session:
             try:
-                self.session.abort()
+                await self.session.abort()
             except Exception as e:
                 log(f"Interrupt error: {e}")
+        # Complete the pending query RPC as interrupted
+        if self._query_req_id is not None:
+            send_result(self._query_req_id, {"status": "interrupted"})
+            self._query_req_id = None
+        # Also respond to the interrupt RPC itself
         send_result(req_id, {"status": "interrupted"})
 
     async def handle_permission_response(self, req_id: int, params: dict) -> None:
@@ -162,8 +168,10 @@ class CopilotBridge:
         allow = params.get("allow", False)
         future = self.pending_permissions.pop(perm_id, None)
         if future and not future.done():
-            from copilot import PermissionRequestResult
-            future.set_result(PermissionRequestResult(approved=allow))
+            if allow:
+                future.set_result({"kind": "approved"})
+            else:
+                future.set_result({"kind": "denied-interactively-by-user"})
         send_result(req_id, {"ok": True})
 
     async def handle_question_response(self, req_id: int, params: dict) -> None:
@@ -188,23 +196,43 @@ class CopilotBridge:
                 pass
         send_result(req_id, {"ok": True})
 
-    async def _handle_permission(self, request) -> Any:
+    async def _handle_permission(self, request, invocation=None) -> dict:
         """Permission callback — send to Sublime, wait for response."""
-        from copilot import PermissionRequestResult
-
         self.permission_counter += 1
         perm_id = self.permission_counter
         future = asyncio.get_running_loop().create_future()
         self.pending_permissions[perm_id] = future
 
-        # Extract tool info
-        tool_name = getattr(request, 'tool_name', '') or str(request)
-        tool_input = getattr(request, 'tool_input', {}) or {}
+        # Extract human-readable tool info
+        req = request if isinstance(request, dict) else vars(request) if hasattr(request, '__dict__') else {"raw": str(request)}
+        kind = req.get("kind", "tool")
+        intention = req.get("intention", "")
+        path = req.get("path", "")
+
+        if kind == "shell":
+            tool_name = "Bash"
+            cmd = req.get("fullCommandText", "") or ""
+            tool_input = {"command": cmd, "description": intention or cmd[:80]}
+        elif kind == "write":
+            tool_name = "Edit"
+            tool_input = {"file_path": path, "description": intention}
+        elif kind == "read":
+            tool_name = "Read"
+            tool_input = {"file_path": path, "description": intention}
+        elif kind == "mcp":
+            tool_name = "MCP"
+            tool_input = {"description": intention}
+        elif kind == "url":
+            tool_name = "Fetch"
+            tool_input = {"description": intention}
+        else:
+            tool_name = kind.title()
+            tool_input = {"description": intention or str(req)[:100]}
 
         send_notification("permission_request", {
             "id": perm_id,
             "tool": tool_name,
-            "input": tool_input if isinstance(tool_input, dict) else str(tool_input),
+            "input": tool_input,
         })
 
         result = await future
@@ -235,16 +263,45 @@ class CopilotBridge:
                 send_notification("message", {"type": "thinking", "thinking": text})
 
         elif etype == SessionEventType.TOOL_EXECUTION_START:
-            name = getattr(data, 'tool_name', '') or getattr(data, 'name', '') or 'tool'
-            send_notification("message", {"type": "tool_use", "name": name, "input": {}})
+            tool_name = getattr(data, 'tool_name', '') or ''
+            mcp_server = getattr(data, 'mcp_server_name', '') or ''
+            mcp_tool = getattr(data, 'mcp_tool_name', '') or ''
+            tool_call_id = getattr(data, 'tool_call_id', '') or ''
+            args = getattr(data, 'arguments', None) or {}
+            if not isinstance(args, dict):
+                args = {}
+            # Build display name with context from arguments
+            if mcp_server and mcp_tool:
+                name = f"{mcp_server}:{mcp_tool}"
+            elif tool_name:
+                # Add key argument to name for readability
+                hint = args.get('pattern') or args.get('command') or args.get('path') or args.get('file_path') or args.get('intent') or args.get('query') or args.get('prompt') or ''
+                if hint:
+                    hint_str = str(hint)
+                    if '/' in hint_str and self._session_config.get('working_directory'):
+                        cwd = self._session_config['working_directory']
+                        if hint_str.startswith(cwd):
+                            hint_str = hint_str[len(cwd):].lstrip('/')
+                    elif len(hint_str) > 60:
+                        hint_str = hint_str[:60]
+                    name = f"{tool_name}({hint_str})"
+                else:
+                    name = tool_name
+            else:
+                name = 'tool'
+            send_notification("message", {"type": "tool_use", "id": tool_call_id, "name": name, "input": args})
 
         elif etype == SessionEventType.TOOL_EXECUTION_COMPLETE:
-            name = getattr(data, 'tool_name', '') or getattr(data, 'name', '') or 'tool'
-            is_error = getattr(data, 'is_error', False)
-            content = getattr(data, 'result', '') or ''
+            tool_call_id = getattr(data, 'tool_call_id', '') or ''
+            result = getattr(data, 'result', None)
+            content = ""
+            is_error = False
+            if result:
+                content = getattr(result, 'output', '') or getattr(result, 'content', '') or str(result)[:500]
+                is_error = bool(getattr(result, 'is_error', False) or getattr(result, 'error', None))
             send_notification("message", {
                 "type": "tool_result",
-                "tool_use_id": name,
+                "tool_use_id": tool_call_id,
                 "content": str(content)[:500],
                 "is_error": is_error,
             })
