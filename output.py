@@ -889,18 +889,6 @@ class OutputView:
             detail = cmd
         elif tool in ("Read", "Edit", "Write"):
             detail = tool_input.get("file_path") or tool_input.get("description") or ""
-            # Show diff for Edit
-            if tool == "Edit" and "old_string" in tool_input:
-                old = tool_input["old_string"]
-                new = tool_input.get("new_string", "")
-                diff_lines = []
-                for line in old.splitlines()[:5]:
-                    diff_lines.append(f"  - {line}")
-                for line in new.splitlines()[:5]:
-                    diff_lines.append(f"  + {line}")
-                if len(old.splitlines()) > 5 or len(new.splitlines()) > 5:
-                    diff_lines.append("  ...")
-                detail += "\n" + "\n".join(diff_lines)
         elif tool == "Glob" and "pattern" in tool_input:
             detail = tool_input["pattern"]
         elif tool == "Grep" and "pattern" in tool_input:

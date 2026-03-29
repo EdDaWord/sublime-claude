@@ -37,6 +37,7 @@ class CopilotBridge:
         self.pending_permissions = {}
         self.pending_questions = {}
         self._got_first_delta = False
+        self._perm_data_cache = {}  # toolCallId → extra tool_input from permission
 
     async def handle_request(self, req: dict) -> None:
         method = req.get("method")
@@ -75,7 +76,21 @@ class CopilotBridge:
         model_map = {"opus": "claude-opus-4-6", "sonnet": "claude-sonnet-4-6", "haiku": "claude-haiku-4-5"}
         model = model_map.get(model, model)
 
-        self.client = CopilotClient()
+        # MCP server config — must pass via CLI args, not session config
+        import json as _json
+        client_opts = {}
+        mcp_server_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "mcp", "server.py"
+        )
+        if os.path.exists(mcp_server_path):
+            mcp_args = [mcp_server_path]
+            if view_id:
+                mcp_args.append(f"--view-id={view_id}")
+            mcp_config = {"mcpServers": {"sublime": {"command": sys.executable, "args": mcp_args}}}
+            client_opts["cli_args"] = ["--additional-mcp-config", _json.dumps(mcp_config)]
+
+        self.client = CopilotClient(client_opts if client_opts else None)
         await self.client.start()
 
         # Build session config
@@ -88,21 +103,8 @@ class CopilotBridge:
         if system_prompt:
             config["system_message"] = {"content": system_prompt}
 
-        # MCP server config
-        mcp_server_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "mcp", "server.py"
-        )
-        if os.path.exists(mcp_server_path):
-            args = [mcp_server_path]
-            if view_id:
-                args.append(f"--view-id={view_id}")
-            config["mcp_servers"] = {
-                "sublime": {"type": "stdio", "command": sys.executable, "args": args}
-            }
-
         self._session_config = config
-        log(f"Session config: mcp_servers={'sublime' in config.get('mcp_servers', {})}, model={model}, resume={resume_id}")
+        log(f"Session config: mcp_servers={config.get('mcp_servers', {})}, model={model}, resume={resume_id}")
         if resume_id:
             self.session = await self.client.resume_session(resume_id, config)
         else:
@@ -207,7 +209,7 @@ class CopilotBridge:
         req = request if isinstance(request, dict) else vars(request) if hasattr(request, '__dict__') else {"raw": str(request)}
         kind = req.get("kind", "tool")
         intention = req.get("intention", "")
-        path = req.get("path", "")
+        path = req.get("path") or req.get("fileName") or ""
 
         if kind == "shell":
             tool_name = "Bash"
@@ -215,7 +217,30 @@ class CopilotBridge:
             tool_input = {"command": cmd, "description": intention or cmd[:80]}
         elif kind == "write":
             tool_name = "Edit"
-            tool_input = {"file_path": path, "description": intention}
+            diff = req.get("diff", "")
+            # Extract line number and old/new from diff
+            import re as _re
+            old_lines = []
+            new_lines = []
+            line_num = None
+            for line in (diff or "").splitlines():
+                hunk = _re.match(r'^@@ -(\d+)', line)
+                if hunk and line_num is None:
+                    line_num = int(hunk.group(1))
+                elif line.startswith("-") and not line.startswith("---"):
+                    old_lines.append(line[1:])
+                elif line.startswith("+") and not line.startswith("+++"):
+                    new_lines.append(line[1:])
+            file_ref = f"{path}:{line_num}" if line_num else path
+            tool_input = {
+                "file_path": file_ref,
+                "old_string": "\n".join(old_lines[:10]),
+                "new_string": "\n".join(new_lines[:10]),
+            }
+            # Cache for TOOL_EXECUTION_START to pick up
+            tool_call_id = req.get("toolCallId", "")
+            if tool_call_id:
+                self._perm_data_cache[tool_call_id] = tool_input
         elif kind == "read":
             tool_name = "Read"
             tool_input = {"file_path": path, "description": intention}
@@ -263,6 +288,7 @@ class CopilotBridge:
                 send_notification("message", {"type": "thinking", "thinking": text})
 
         elif etype == SessionEventType.TOOL_EXECUTION_START:
+            log(f"TOOL_START raw: tool_name={getattr(data, 'tool_name', '')}, args={getattr(data, 'arguments', None)}, tool_call_id={getattr(data, 'tool_call_id', '')}")
             tool_name = getattr(data, 'tool_name', '') or ''
             mcp_server = getattr(data, 'mcp_server_name', '') or ''
             mcp_tool = getattr(data, 'mcp_tool_name', '') or ''
@@ -270,29 +296,37 @@ class CopilotBridge:
             args = getattr(data, 'arguments', None) or {}
             if not isinstance(args, dict):
                 args = {}
-            # Build display name with context from arguments
+            # Map copilot tool names to Claude-style names for unified rendering
+            name_map = {"view": "Read", "edit": "Edit", "create": "Write",
+                        "bash": "Bash", "shell": "Bash", "glob": "Glob", "grep": "Grep",
+                        "sql": "Bash", "report_intent": "Task"}
+            name = name_map.get(tool_name, tool_name)
             if mcp_server and mcp_tool:
-                name = f"{mcp_server}:{mcp_tool}"
-            elif tool_name:
-                # Add key argument to name for readability
-                hint = args.get('pattern') or args.get('command') or args.get('path') or args.get('file_path') or args.get('intent') or args.get('query') or args.get('prompt') or ''
-                if hint:
-                    hint_str = str(hint)
-                    if '/' in hint_str and self._session_config.get('working_directory'):
-                        cwd = self._session_config['working_directory']
-                        if hint_str.startswith(cwd):
-                            hint_str = hint_str[len(cwd):].lstrip('/')
-                    elif len(hint_str) > 60:
-                        hint_str = hint_str[:60]
-                    name = f"{tool_name}({hint_str})"
-                else:
-                    name = tool_name
-            else:
-                name = 'tool'
-            send_notification("message", {"type": "tool_use", "id": tool_call_id, "name": name, "input": args})
+                name = f"mcp__{mcp_server}__{mcp_tool}"
+            # Map copilot arg keys to Claude-style keys for _format_tool_detail
+            tool_input = dict(args)
+            if "path" in tool_input and "file_path" not in tool_input:
+                tool_input["file_path"] = tool_input.pop("path")
+            if "old_str" in tool_input and "old_string" not in tool_input:
+                tool_input["old_string"] = tool_input.pop("old_str")
+            if "new_str" in tool_input and "new_string" not in tool_input:
+                tool_input["new_string"] = tool_input.pop("new_str")
+            if name == "Bash" and "command" not in tool_input:
+                tool_input["command"] = tool_input.get("intent", str(args)[:80])
+            # Merge cached permission data (e.g. diff from write approval)
+            cached = self._perm_data_cache.pop(tool_call_id, None)
+            if cached:
+                tool_input.update(cached)
+            log(f"TOOL_USE sent: name={name}, input_keys={list(tool_input.keys())}")
+            send_notification("message", {"type": "tool_use", "id": tool_call_id, "name": name, "input": tool_input})
 
         elif etype == SessionEventType.TOOL_EXECUTION_COMPLETE:
             tool_call_id = getattr(data, 'tool_call_id', '') or ''
+            tool_name = getattr(data, 'tool_name', '') or ''
+            name_map = {"view": "Read", "edit": "Edit", "create": "Write",
+                        "bash": "Bash", "shell": "Bash", "glob": "Glob", "grep": "Grep",
+                        "sql": "Bash", "report_intent": "Task"}
+            name = name_map.get(tool_name, tool_name)
             result = getattr(data, 'result', None)
             content = ""
             is_error = False
@@ -301,7 +335,7 @@ class CopilotBridge:
                 is_error = bool(getattr(result, 'is_error', False) or getattr(result, 'error', None))
             send_notification("message", {
                 "type": "tool_result",
-                "tool_use_id": tool_call_id,
+                "tool_use_id": tool_call_id or name,
                 "content": str(content)[:500],
                 "is_error": is_error,
             })

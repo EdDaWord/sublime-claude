@@ -367,11 +367,16 @@ class CodexBridge:
         item_id = item.get("id", "")
 
         if item_type == "commandExecution":
+            # Prefer clean command from commandActions, fall back to full command
+            actions = item.get("commandActions", [])
+            cmd = actions[0].get("command", "") if actions else ""
+            if not cmd:
+                cmd = item.get("command", "")
             send_notification("message", {
                 "type": "tool_use",
                 "id": item_id,
                 "name": "Bash",
-                "input": {"command": item.get("command", "")},
+                "input": {"command": cmd},
             })
         elif item_type == "fileChange":
             # Determine if it's a new file or edit
@@ -385,8 +390,11 @@ class CodexBridge:
         elif item_type == "mcpToolCall":
             tool_name = item.get("toolName", "")
             server = item.get("serverLabel", "")
-            if tool_name:
-                name = f"{server}:{tool_name}" if server else tool_name
+            # Match Claude's MCP tool naming: mcp__server__tool
+            if server and tool_name:
+                name = f"mcp__{server}__{tool_name}"
+            elif tool_name:
+                name = tool_name
             else:
                 name = server or "mcp"
             send_notification("message", {
