@@ -818,6 +818,7 @@ You are subsession **{subsession_id}**. Call signal_complete(session_id={view_id
                 pass
 
         self.interrupted = False  # Reset at start of query
+        self._got_first_delta = False
         self.query_id = id  # Store for inject_message to know query is active
 
         async def _drain_stale():
@@ -900,13 +901,21 @@ You are subsession **{subsession_id}**. Call signal_complete(session_id={view_id
         """Emit a message notification."""
         if isinstance(message, StreamEvent):
             event = message.event
-            if event.get("type") == "content_block_delta":
+            etype = event.get("type")
+            if etype == "content_block_start":
+                self._got_first_delta = False
+            elif etype == "content_block_delta":
                 delta = event.get("delta", {})
                 if delta.get("type") == "text_delta":
-                    send_notification("message", {
-                        "type": "text_delta",
-                        "text": delta["text"],
-                    })
+                    text = delta["text"]
+                    if not self._got_first_delta:
+                        text = text.lstrip('\n')
+                        self._got_first_delta = True
+                    if text:
+                        send_notification("message", {
+                            "type": "text_delta",
+                            "text": text,
+                        })
             return
 
         if isinstance(message, AssistantMessage):
