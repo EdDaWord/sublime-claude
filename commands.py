@@ -79,10 +79,11 @@ class ClaudeCodeStartCommand(sublime_plugin.WindowCommand):
             desc = config.get("description", f"{config.get('model', 'default')} model")
             options.append(("profile", name, f"📋 {name}", desc))
 
-        # Checkpoints
-        for name, config in checkpoints.items():
-            desc = config.get("description", "Saved checkpoint")
-            options.append(("checkpoint", name, f"📍 {name}", desc))
+        # Checkpoints (Claude-only, session IDs are backend-specific)
+        if backend == "claude":
+            for name, config in checkpoints.items():
+                desc = config.get("description", "Saved checkpoint")
+                options.append(("checkpoint", name, f"📍 {name}", desc))
 
         if len(options) == 1:
             # Only default, just start
@@ -99,7 +100,7 @@ class ClaudeCodeStartCommand(sublime_plugin.WindowCommand):
             if opt_type == "default":
                 create_session(self.window, backend=backend)
             elif opt_type == "persona":
-                self._show_persona_picker(opt_name)  # opt_name contains the URL
+                self._show_persona_picker(opt_name, backend=backend)  # opt_name contains the URL
             elif opt_type == "profile":
                 profile_config = profiles.get(opt_name, {})
                 create_session(self.window, profile=profile_config, backend=backend)
@@ -113,7 +114,7 @@ class ClaudeCodeStartCommand(sublime_plugin.WindowCommand):
 
         self.window.show_quick_panel(items, on_select)
 
-    def _show_persona_picker(self, persona_url: str) -> None:
+    def _show_persona_picker(self, persona_url: str, backend: str = "claude") -> None:
         """Show list of personas to pick from."""
         from . import persona_client
         import threading
@@ -145,7 +146,7 @@ class ClaudeCodeStartCommand(sublime_plugin.WindowCommand):
                     if idx < 0:
                         return
                     persona_id = options[idx][0]
-                    self._start_with_persona(persona_id, persona_url)
+                    self._start_with_persona(persona_id, persona_url, backend=backend)
 
                 self.window.show_quick_panel(items, on_select)
 
@@ -153,7 +154,7 @@ class ClaudeCodeStartCommand(sublime_plugin.WindowCommand):
 
         threading.Thread(target=fetch_and_show, daemon=True).start()
 
-    def _start_with_persona(self, persona_id: int, persona_url: str = None) -> None:
+    def _start_with_persona(self, persona_id: int, persona_url: str = None, backend: str = "claude") -> None:
         """Acquire persona and start session."""
         from . import persona_client
         from .settings import load_project_settings
@@ -198,7 +199,7 @@ class ClaudeCodeStartCommand(sublime_plugin.WindowCommand):
             }
 
             def start():
-                s = create_session(self.window, profile=profile_config)
+                s = create_session(self.window, profile=profile_config, backend=backend)
                 # Show handoff notes if present
                 if handoff_notes:
                     s.output.text(f"\n*Handoff notes:* {handoff_notes}\n")
@@ -1106,10 +1107,11 @@ class ClaudeCodeSwitchCommand(sublime_plugin.WindowCommand):
             items.append([f"😶 {backend_prefix}{name}", desc])
             actions.append(("profile", config))
 
-        for name, config in checkpoints.items():
-            desc = config.get("description", "Saved checkpoint")
-            items.append([f"📍 {backend_prefix}{name}", desc])
-            actions.append(("checkpoint", config))
+        if backend == "claude":
+            for name, config in checkpoints.items():
+                desc = config.get("description", "Saved checkpoint")
+                items.append([f"📍 {backend_prefix}{name}", desc])
+                actions.append(("checkpoint", config))
 
         # Add "From Persona" option
         sublime_settings = sublime.load_settings("ClaudeCode.sublime-settings")
@@ -1202,13 +1204,13 @@ class ClaudeCodeSwitchCommand(sublime_plugin.WindowCommand):
                         create_session(self.window, resume_id=data.session_id, fork=True)
                 elif action == "persona" and data:
                     # Show persona picker
-                    self._show_persona_picker(data)
+                    self._show_persona_picker(data, backend=backend)
                 elif action == "focus" and data:
                     data.output.show()
 
         self.window.show_quick_panel(items, on_select)
 
-    def _show_persona_picker(self, persona_url: str) -> None:
+    def _show_persona_picker(self, persona_url: str, backend: str = "claude") -> None:
         """Show list of personas to pick from."""
         from . import persona_client
         from .core import create_session
@@ -1241,7 +1243,7 @@ class ClaudeCodeSwitchCommand(sublime_plugin.WindowCommand):
                     if idx < 0:
                         return
                     persona_id = options[idx][0]
-                    self._start_with_persona(persona_id, persona_url)
+                    self._start_with_persona(persona_id, persona_url, backend=backend)
 
                 self.window.show_quick_panel(items, on_select)
 
@@ -1249,7 +1251,7 @@ class ClaudeCodeSwitchCommand(sublime_plugin.WindowCommand):
 
         threading.Thread(target=fetch_and_show, daemon=True).start()
 
-    def _start_with_persona(self, persona_id: int, persona_url: str) -> None:
+    def _start_with_persona(self, persona_id: int, persona_url: str, backend: str = "claude") -> None:
         """Acquire persona and start session."""
         from . import persona_client
         from .core import create_session
@@ -1282,7 +1284,7 @@ class ClaudeCodeSwitchCommand(sublime_plugin.WindowCommand):
             }
 
             def start():
-                s = create_session(self.window, profile=profile_config)
+                s = create_session(self.window, profile=profile_config, backend=backend)
                 if handoff_notes:
                     s.output.text(f"\n*Handoff notes:* {handoff_notes}\n")
                 sublime.status_message(f"Acquired persona: {persona.get('alias', 'unknown')}")
